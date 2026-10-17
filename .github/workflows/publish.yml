@@ -1,0 +1,81 @@
+# Gerado a partir de release-channel/ no repositório privado; alterações manuais aqui são sobrescritas.
+name: Publicar release
+on:
+  push:
+    tags: ['v*']
+  # Recuperação: publicar uma tag já enviada cujo evento de push não gerou execução.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag já enviada (vX.Y.Z) com branch release-payload/vX.Y.Z'
+        required: true
+permissions:
+  contents: write
+concurrency:
+  group: publish
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Conferir tag
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "::error::Tag invalida: $TAG"; exit 1; fi
+      # Antes dos checkouts: numa reexecução após publicar, o branch do pacote já não existe.
+      - name: Conferir monotonicidade
+        id: mono
+        run: |
+          # Só 404 significa "nenhuma release"; qualquer outra falha da API interrompe.
+          if current=$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name 2>"$RUNNER_TEMP/latest.err"); then :
+          elif grep -q 'HTTP 404' "$RUNNER_TEMP/latest.err"; then current=
+          else cat "$RUNNER_TEMP/latest.err" >&2; exit 1; fi
+          if [ "$current" = "$TAG" ]; then
+            echo "$TAG ja publicada como latest; resta so a limpeza."
+            echo 'published=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -n "$current" ]; then
+            newest=$(printf '%s\n%s\n' "${current#v}" "${TAG#v}" | sort -V | tail -n 1)
+            if [ "$newest" != "${TAG#v}" ]; then echo "::error::$TAG nao e maior que a release atual ($current)"; exit 1; fi
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.mono.outputs.published != 'true'
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.mono.outputs.published != 'true'
+        with:
+          ref: release-payload/${{ env.TAG }}
+          path: incoming
+          persist-credentials: false
+      - name: Conferir pacote
+        if: steps.mono.outputs.published != 'true'
+        run: node tools/verify-payload.mjs incoming/payload "$TAG" "$RUNNER_TEMP/notes.md"
+      - name: Criar rascunho
+        if: steps.mono.outputs.published != 'true'
+        run: |
+          # Atribuição separada: com bash -e, falha dentro da lista de um for seria ignorada.
+          drafts=$(gh api "repos/$GH_REPO/releases?per_page=100" --jq ".[] | select(.draft and .tag_name == \"$TAG\") | .id")
+          for id in $drafts; do gh api --method DELETE "repos/$GH_REPO/releases/$id"; done
+          gh release create "$TAG" --verify-tag --draft --title "Etiqueta ${TAG#v}" --notes-file "$RUNNER_TEMP/notes.md" incoming/payload/*
+      - name: Conferir anexos publicados
+        if: steps.mono.outputs.published != 'true'
+        run: |
+          gh release download "$TAG" --dir "$RUNNER_TEMP/check"
+          cd "$RUNNER_TEMP/check"
+          sha256sum --check --strict "$GITHUB_WORKSPACE/incoming/payload/SHA256SUMS"
+          cmp SHA256SUMS "$GITHUB_WORKSPACE/incoming/payload/SHA256SUMS"
+      - name: Publicar e promover a latest
+        if: steps.mono.outputs.published != 'true'
+        run: gh release edit "$TAG" --draft=false --latest
+      - name: Remover branch do pacote
+        run: |
+          if ! gh api --method DELETE "repos/$GH_REPO/git/refs/heads/release-payload/$TAG" 2>"$RUNNER_TEMP/delete.err"; then
+            grep -q 'Reference does not exist' "$RUNNER_TEMP/delete.err" || { cat "$RUNNER_TEMP/delete.err" >&2; exit 1; }
+          fi
