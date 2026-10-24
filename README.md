@@ -37,3 +37,18 @@ Get-AuthenticodeSignature .\Etiqueta_<versão>_x64-setup.exe | Format-List Statu
 ```
 
 Sem confiar no certificado, `Status` aparece como `UnknownError` (raiz não confiável); confira então a impressão digital em `SignerCertificate`.
+
+## Avisos de terceiros e SBOM
+
+As releases geradas a partir do Plano 3 trazem, ao lado do instalador, dois arquivos sobre os componentes de código aberto distribuídos com o Etiqueta (releases mais antigas não os têm):
+
+- `THIRD-PARTY-NOTICES.txt`: a lista dos componentes e o texto de cada licença. É o mesmo arquivo que o instalador copia para a pasta de instalação e que o aplicativo mostra em *Configurações → Sobre*.
+- `sbom.cdx.json`: a lista de materiais de software (SBOM) no formato CycloneDX 1.5, com nome, versão, licença e hash de cada componente, para ferramentas de inventário e de conferência de vulnerabilidades.
+
+Os dois entram no `SHA256SUMS` da release, e o `build-info.json` repete o SHA-256 deles (`noticesSha256` e `sbomSha256`). Para conferir um download:
+
+```powershell
+Get-FileHash .\THIRD-PARTY-NOTICES.txt, .\sbom.cdx.json -Algorithm SHA256   # compare com SHA256SUMS e com build-info.json
+```
+
+O publicador recusa um pacote que traga só um dos dois arquivos ou cujo SHA-256 não confira com o `build-info.json`.

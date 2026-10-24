@@ -1,5 +1,7 @@
 // Confere o pacote enviado pelo pipeline privado antes de publicá-lo e gera as notas da release.
 // Uso: node tools/verify-payload.mjs <pasta-do-pacote> <tag> <arquivo-notas>
+// O pacote tem 5 arquivos (instalador, .sig, SHA256SUMS, build-info.json, latest.json) ou esses 5 mais os avisos de
+// terceiros e o SBOM (THIRD-PARTY-NOTICES.txt, sbom.cdx.json), cujos SHA-256 o build-info.json repete; nunca outro conjunto.
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
@@ -7,6 +9,8 @@ import process from 'node:process';
 import { URL } from 'node:url';
 import { verifyUpdater } from './verify-updater.mjs';
 
+const NOTICES = 'THIRD-PARTY-NOTICES.txt';
+const SBOM = 'sbom.cdx.json';
 const [dir, tag, notesFile] = process.argv.slice(2);
 const repository = process.env.GITHUB_REPOSITORY;
 const fail = (message) => { throw new Error(message); };
@@ -14,7 +18,9 @@ if (!dir || !notesFile || !/^v\d+\.\d+\.\d+$/.test(tag ?? '') || !repository) fa
 const version = tag.slice(1);
 const files = readdirSync(dir).sort();
 const installer = files.find((name) => name.endsWith(`_${version}_x64-setup.exe`)) ?? fail(`Instalador ${version} ausente`);
-const expected = [installer, `${installer}.sig`, 'SHA256SUMS', 'build-info.json', 'latest.json'].sort();
+const base = [installer, `${installer}.sig`, 'SHA256SUMS', 'build-info.json', 'latest.json'];
+const withNotices = files.includes(NOTICES) || files.includes(SBOM);
+const expected = (withNotices ? [...base, NOTICES, SBOM] : base).sort();
 if (JSON.stringify(files) !== JSON.stringify(expected)) fail(`Arquivos inesperados: ${files.join(', ')}`);
 
 const sha256 = (name) => createHash('sha256').update(readFileSync(join(dir, name))).digest('hex');
@@ -37,12 +43,19 @@ if (!signed.includes(`file:${installer}`) || !signed.includes(`version:${version
 
 const info = JSON.parse(readFileSync(join(dir, 'build-info.json'), 'utf8'));
 if (info.version !== version || info.installerSha256 !== sha256(installer)) fail('build-info.json inconsistente');
+if (withNotices) {
+  if (info.noticesSha256 !== sha256(NOTICES)) fail(`build-info.json: SHA-256 de ${NOTICES} divergente`);
+  if (info.sbomSha256 !== sha256(SBOM)) fail(`build-info.json: SHA-256 de ${SBOM} divergente`);
+} else if ('noticesSha256' in info || 'sbomSha256' in info) {
+  fail(`build-info.json cita ${NOTICES}/${SBOM}, ausentes do pacote`);
+}
 writeFileSync(notesFile, [
   `${manifest.notes}`,
   '',
   'Instalador Windows x64 por usuário. O aplicativo instalado atualiza-se sozinho a partir desta página; cada pacote é conferido pela assinatura do atualizador antes de ser instalado.',
   '',
   `- SHA-256 do instalador: \`${info.installerSha256}\``,
+  ...(withNotices ? [`- Avisos de terceiros (\`${NOTICES}\`, SHA-256 \`${info.noticesSha256}\`) e SBOM CycloneDX (\`${SBOM}\`, SHA-256 \`${info.sbomSha256}\`).`] : []),
   `- Authenticode autoassinado, impressão digital \`${info.authenticode?.thumbprint ?? 'n/d'}\`. Para confiar nele numa máquina (opcional, administrador): \`powershell -ExecutionPolicy Bypass -File .\\instalar-certificado.ps1 -ImpressaoDigital ${info.authenticode?.thumbprint ?? '<impressão>'}\``,
   `- Commit de origem: \`${info.commit.slice(0, 12)}\``,
 ].join('\n') + '\n');
